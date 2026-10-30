@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    body {
+      width: 290px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      padding: 14px;
+      margin: 0;
+      background: #fafafa;
+      color: #1e1e1e;
+    }
+    h3 { margin-top: 0; margin-bottom: 8px; font-size: 15px; }
+    input[type="text"] {
+      width: 100%;
+      box-sizing: border-box;
+      padding: 8px;
+      margin-bottom: 10px;
+      border: 1px solid #d1d5db;
+      border-radius: 5px;
+      font-size: 13px;
+    }
+    button {
+      width: 100%;
+      padding: 9px;
+      border-radius: 5px;
+      border: none;
+      font-weight: 600;
+      cursor: pointer;
+      font-size: 13px;
+    }
+    .btn-start { background: #16a34a; color: #fff; }
+    .btn-stop { background: #dc2626; color: #fff; }
+    .status {
+      margin-top: 10px;
+      font-size: 12px;
+      color: #4b5563;
+      word-break: break-word;
+    }
+    details { margin-top: 14px; font-size: 11px; }
+    summary { cursor: pointer; color: #6b7280; font-weight: 500; }
+    .field-group { margin-top: 8px; }
+    label { font-size: 11px; color: #374151; display: block; margin-bottom: 3px; }
+  </style>
+</head>
+<body>
+  <h3>Research Copilot</h3>
+  
+  <div>
+    <input type="text" id="topicInput" placeholder="Topic: e.g. Baker Family - Berks Co PA" />
+    <button id="toggleBtn" class="btn-start">Start Session</button>
+  </div>
+
+  <div class="status" id="statusText">Checking status...</div>
+
+  <details>
+    <summary>Connection Settings</summary>
+    <div class="field-group">
+      <label>Server URL:</label>
+      <input type="text" id="serverUrlInput" value="http://192.168.5.159:8766" />
+      <label>Secret Token:</label>
+      <input type="text" id="tokenInput" value="change-this-to-a-secure-random-token" />
+      <button id="saveSettingsBtn" style="background:#e5e7eb; color:#111; font-weight:normal;">Save Settings</button>
+    </div>
+  </details>
+
+  <script src="popup.js"></script>
+</body>
+</html>

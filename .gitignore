@@ -145,5 +145,22 @@ vite.config.ts.timestamp-*
 # Astro generated types
 .astro/
 
+# ==========================================
+# Python & Virtual Environments
+# ==========================================
+venv/
+.venv/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# ==========================================
+# Project Runtime State
+# ==========================================
+session_state.json
+
 # Turbo Repo
 .turbo

@@ -84,15 +84,35 @@ def clean_url(url: str) -> str:
     return cleaned
 
 def clean_noise(text: str) -> str:
-    """Strip common navigation bar noise from Ancestry / FamilySearch / web dumps."""
+    """Aggressively strip platform navigation, footers, and whitespace bloat."""
+    if not text:
+        return ""
+
     noise_patterns = [
-        r"Skip Ancestry main menu.*?(?=\n\n|\Z)",
-        r"Home\s+Trees\s+Search\s+Memories\s+DNA.*?(?=\n\n|\Z)",
-        r"Does this record match the person in your tree\?.*?(?=\n\n|\Z)",
+        # Ancestry nav and account junk
+        r"(?i)Skip Ancestry main menu.*?(?=\n\n|\Z)",
+        r"(?i)Home\s+Trees\s+Search\s+Memories\s+DNA.*?(?=\n\n|\Z)",
+        r"(?i)Does this record match the person in your tree\?.*?(?=\n\n|\Z)",
+        r"(?i)Add new information to your tree.*?(?=\n\n|\Z)",
+        r"(?i)FactsHints\d+GalleryLifeStoryExp.*?(?=\n\n|\Z)",
+        # FamilySearch nav junk
+        r"(?i)An official website of The Church of Jesus Christ of Latter-day Saints.*?(?=\n\n|\Z)",
+        r"(?i)Family Tree\s+Search\s+Memories\s+Get Involved.*?(?=\n\n|\Z)",
+        # Find A Grave boilerplate
+        r"(?i)Memorials\s+Cemeteries\s+Contribute\s+Famous.*?(?=\n\n|\Z)",
+        r"(?i)Photos\s+\d+\s+Flowers\s+\d+.*?(?=\n\n|\Z)",
+        # Cookie & login banners
+        r"(?i)We use cookies.*?(?=\n\n|\Z)",
+        r"(?i)Sign [Ii]n\s+to\s+your\s+account.*?(?=\n\n|\Z)",
     ]
+
     cleaned = text
     for p in noise_patterns:
-        cleaned = re.sub(p, "", cleaned, flags=re.DOTALL | re.IGNORECASE)
+        cleaned = re.sub(p, "", cleaned, flags=re.DOTALL)
+
+    # Collapse multiple consecutive newlines and spaces
+    cleaned = re.sub(r'[ \t]+', ' ', cleaned)
+    cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
     return cleaned.strip()
 
 def format_with_ollama(title: str, url: str, record_data: dict, text_content: str, selection: str, is_image: bool) -> Optional[str]:
@@ -204,14 +224,22 @@ def append_to_vault(capture: CaptureRequest):
     else:
         lines.append("*(AI offline – direct extract logged)*\n")
         lines.append("## Record Data")
-        if capture.recordData:
+
+        # Priority 1: If structured table fields exist, write ONLY those (Drop raw body text!)
+        if capture.recordData and len(capture.recordData) > 0:
             for k, v in capture.recordData.items():
-                lines.append(f"- **{k}:** {v}")
+                clean_val = clean_noise(str(v))
+                if clean_val:
+                    lines.append(f"- **{k}:** {clean_val}")
+
+        # Priority 2: Full-text search transcription snippet (strictly capped at 350 chars)
         elif capture.transcription:
-            clean_sub = clean_noise(capture.transcription)[:400]
+            clean_sub = clean_noise(capture.transcription)[:350].strip()
             lines.append(f"> {clean_sub}...")
-        else:
-            clean_sub = clean_noise(capture.rawFallback)[:250]
+
+        # Priority 3: Raw fallback excerpt (strictly capped at 250 chars)
+        elif capture.rawFallback:
+            clean_sub = clean_noise(capture.rawFallback)[:250].strip()
             lines.append(f"> {clean_sub}...")
 
     note_content = "\n".join(lines) + "\n"

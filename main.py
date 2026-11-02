@@ -13,18 +13,17 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Resolve path properly with tilde expansion
-VAULT_DIR = Path(os.getenv("VAULT_DIR", "~/vault/PA-Zone")).expanduser().resolve()
+VAULT_DIR = Path(os.getenv("VAULT_DIR", "~/Obsidian/PA-Zone")).expanduser().resolve()
 VAULT_DIR.mkdir(parents=True, exist_ok=True)
 
 STATE_FILE = Path(__file__).parent / "session_state.json"
-OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:latest")
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://192.168.2.86:11434")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "batiai/gemma4-26b:iq4")
 API_SECRET_TOKEN = os.getenv("API_SECRET_TOKEN", "change-this-to-a-secure-random-token")
 
 file_write_lock = threading.Lock()
 
-app = FastAPI(title="Genealogy & Archival Research Logger")
+app = FastAPI(title="Genealogy & Archival Research Logger (Atomic Notes)")
 
 app.add_middleware(
     CORSMiddleware,
@@ -44,7 +43,7 @@ def load_session() -> dict:
     return {
         "active": False,
         "topic": "General Research",
-        "filename": None,
+        "folder": None,
         "start_time": None
     }
 
@@ -75,17 +74,31 @@ def verify_token(authorization: Optional[str] = Header(None)):
         raise HTTPException(status_code=403, detail="Invalid token")
     return token
 
+def sanitize_slug(text: str) -> str:
+    slug = re.sub(r'[^a-zA-Z0-9_\- ]+', '', text).strip().replace(" ", "-")
+    return slug[:40] if slug else "record"
+
 def clean_url(url: str) -> str:
-    """Strip noisy session tracking parameters while keeping vital query IDs & ARKs."""
     cleaned = re.sub(r'([&?])(treeref|queryId|clickref|authProvider|recId|_gl)=[^&]*', '', url)
     cleaned = cleaned.rstrip('?&')
     return cleaned
 
+def clean_noise(text: str) -> str:
+    """Strip common navigation bar noise from Ancestry / FamilySearch / web dumps."""
+    noise_patterns = [
+        r"Skip Ancestry main menu.*?(?=\n\n|\Z)",
+        r"Home\s+Trees\s+Search\s+Memories\s+DNA.*?(?=\n\n|\Z)",
+        r"Does this record match the person in your tree\?.*?(?=\n\n|\Z)",
+    ]
+    cleaned = text
+    for p in noise_patterns:
+        cleaned = re.sub(p, "", cleaned, flags=re.DOTALL | re.IGNORECASE)
+    return cleaned.strip()
+
 def format_with_ollama(title: str, url: str, record_data: dict, text_content: str, selection: str, is_image: bool) -> Optional[str]:
-    """Generates a structured genealogical evidence abstract or research article summary."""
     data_lines = [f"{k}: {v}" for k, v in record_data.items()]
     data_dump = "\n".join(data_lines)
-    snippet = text_content[:3000].strip()
+    snippet = clean_noise(text_content[:3000])
 
     prompt = (
         "You are an expert genealogical and historical research assistant. "
@@ -110,7 +123,7 @@ def format_with_ollama(title: str, url: str, record_data: dict, text_content: st
     )
 
     try:
-        with httpx.Client(timeout=12.0) as client:
+        with httpx.Client(timeout=45.0) as client:
             resp = client.post(
                 f"{OLLAMA_BASE_URL}/api/generate",
                 json={
@@ -129,18 +142,23 @@ def format_with_ollama(title: str, url: str, record_data: dict, text_content: st
 
 def append_to_vault(capture: CaptureRequest):
     now = datetime.datetime.now()
+    date_str = now.strftime("%Y-%m-%d")
     time_str = now.strftime("%H:%M:%S")
+    time_slug = now.strftime("%H%M%S")
 
-    if current_session["active"] and current_session["filename"]:
-        filepath = VAULT_DIR / current_session["filename"]
+    # 1. Determine session subfolder
+    if current_session["active"] and current_session.get("folder"):
+        session_dir = VAULT_DIR / current_session["folder"]
     else:
-        date_str = now.strftime("%Y-%m-%d")
-        filepath = VAULT_DIR / f"{date_str}-research-log.md"
+        session_dir = VAULT_DIR / f"{date_str}-Quick-Captures"
+
+    session_dir.mkdir(parents=True, exist_ok=True)
 
     cleaned_url = clean_url(capture.url)
     cleaned_title = capture.title.replace(" - FamilySearch", "").replace(" | Ancestry®", "").strip()
+    title_slug = sanitize_slug(cleaned_title)
 
-    # Attempt AI processing
+    # 2. Attempt AI abstract
     ai_summary = format_with_ollama(
         cleaned_title,
         cleaned_url,
@@ -150,33 +168,69 @@ def append_to_vault(capture: CaptureRequest):
         capture.isImageRecord
     )
 
-    # Build entry
-    entry = f"\n### [{time_str}] [{cleaned_title}]({cleaned_url})\n"
+    # 3. Build the Atomic Record Note (~1KB)
+    record_filename = f"{time_slug}-{title_slug}.md"
+    record_path = session_dir / record_filename
+
+    # Build YAML properties cleanly without raw column-0 dashes
+    fence = "---"
+    rec_type = "archive-image" if capture.isImageRecord else "record"
+    ai_flag = "true" if ai_summary else "false"
+
+    lines = [
+        fence,
+        f'title: "{cleaned_title}"',
+        f'date: {now.isoformat()}',
+        f'url: "{cleaned_url}"',
+        f'type: {rec_type}',
+        f'ai_processed: {ai_flag}',
+        fence,
+        "",
+        f"# [{cleaned_title}]({cleaned_url})",
+        f"- **Captured:** {now.strftime('%Y-%m-%d %H:%M:%S')}",
+        f"- **Source Link:** {cleaned_url}",
+        ""
+    ]
+
     if capture.isImageRecord:
-        entry += "> 📷 **Type:** Record Image / Archive Viewer\n\n"
+        lines.append("> 📷 **Type:** Record Image / Archive Viewer\n")
 
     if capture.selection:
-        entry += f"> **Highlighted Excerpt:**\n> {capture.selection.strip()}\n\n"
+        lines.append(f"> **Highlighted Excerpt:**\n> {capture.selection.strip()}\n")
 
     if ai_summary:
-        entry += f"{ai_summary}\n"
+        lines.append("## Research Abstract")
+        lines.append(ai_summary)
     else:
-        # Graceful zero-AI fallback: logs clean structured fields or readable text preview
-        entry += "*(AI offline – direct extract logged)*\n\n"
+        lines.append("*(AI offline – direct extract logged)*\n")
+        lines.append("## Record Data")
         if capture.recordData:
             for k, v in capture.recordData.items():
-                entry += f"- **{k}:** {v}\n"
+                lines.append(f"- **{k}:** {v}")
         elif capture.transcription:
-            entry += f"> {capture.transcription[:500]}...\n"
+            clean_sub = clean_noise(capture.transcription)[:400]
+            lines.append(f"> {clean_sub}...")
         else:
-            entry += f"> {capture.rawFallback[:300]}...\n"
+            clean_sub = clean_noise(capture.rawFallback)[:250]
+            lines.append(f"> {clean_sub}...")
 
-    entry += "\n---\n"
+    note_content = "\n".join(lines) + "\n"
 
-    # Thread-safe write
+    # Write the atomic note
     with file_write_lock:
-        with open(filepath, "a", encoding="utf-8") as f:
-            f.write(entry)
+        with open(record_path, "w", encoding="utf-8") as f:
+            f.write(note_content)
+
+        # 4. Append link to session index
+        index_path = session_dir / "_Index.md"
+        if not index_path.exists():
+            with open(index_path, "w", encoding="utf-8") as f:
+                f.write(f"# Research Session: {current_session.get('topic', 'General Research')}\n")
+                f.write(f"- **Started:** {date_str} {time_str}\n\n## Captured Records\n")
+
+        with open(index_path, "a", encoding="utf-8") as f:
+            note_stem = record_filename[:-3]
+            f.write(f"- [{time_str}] [[{note_stem}|{cleaned_title}]] — [External Source]({cleaned_url})\n")
 
 @app.get("/session/status")
 def get_status(_: str = Depends(verify_token)):
@@ -186,24 +240,27 @@ def get_status(_: str = Depends(verify_token)):
 def start_session(req: SessionStartRequest, _: str = Depends(verify_token)):
     now = datetime.datetime.now()
     date_str = now.strftime("%Y-%m-%d")
-    slug = re.sub(r'[^a-zA-Z0-9_\- ]+', '', req.topic).strip().replace(" ", "-")[:40] or "research-session"
-    filename = f"{date_str}-{slug}.md"
-    filepath = VAULT_DIR / filename
+    slug = sanitize_slug(req.topic)
+    folder_name = f"{date_str}-{slug}"
+    session_dir = VAULT_DIR / folder_name
+    session_dir.mkdir(parents=True, exist_ok=True)
 
     current_session.update({
         "active": True,
         "topic": req.topic,
-        "filename": filename,
+        "folder": folder_name,
         "start_time": now.isoformat()
     })
     save_session(current_session)
 
+    index_path = session_dir / "_Index.md"
     with file_write_lock:
-        if not filepath.exists():
-            with open(filepath, "w", encoding="utf-8") as f:
-                f.write(f"# Research Log: {req.topic}\n")
-                f.write(f"- **Date Started:** {now.strftime('%Y-%m-%d %H:%M:%S')}\n\n")
-                f.write("## Records & Sources Examined\n")
+        if not index_path.exists():
+            with open(index_path, "w", encoding="utf-8") as f:
+                f.write(f"# Research Session: {req.topic}\n")
+                f.write(f"- **Date Started:** {now.strftime('%Y-%m-%d %H:%M:%S')}\n")
+                f.write(f"- **Folder:** `{folder_name}`\n\n")
+                f.write("## Captured Records\n")
 
     return {"message": "Session started", "session": current_session}
 
@@ -213,18 +270,18 @@ def stop_session(_: str = Depends(verify_token)):
         return {"message": "No active session"}
 
     now = datetime.datetime.now()
-    if current_session.get("filename"):
-        filepath = VAULT_DIR / current_session["filename"]
+    if current_session.get("folder"):
+        index_path = VAULT_DIR / current_session["folder"] / "_Index.md"
         with file_write_lock:
-            if filepath.exists():
-                with open(filepath, "a", encoding="utf-8") as f:
+            if index_path.exists():
+                with open(index_path, "a", encoding="utf-8") as f:
                     f.write(f"\n**Session concluded at:** {now.strftime('%Y-%m-%d %H:%M:%S')}\n")
 
     topic = current_session["topic"]
     current_session.update({
         "active": False,
         "topic": "General Research",
-        "filename": None,
+        "folder": None,
         "start_time": None
     })
     save_session(current_session)

@@ -17,8 +17,8 @@ VAULT_DIR = Path(os.getenv("VAULT_DIR", "~/Obsidian/PA-Zone")).expanduser().reso
 VAULT_DIR.mkdir(parents=True, exist_ok=True)
 
 STATE_FILE = Path(__file__).parent / "session_state.json"
-OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://192.168.2.86:11434")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "batiai/gemma4-26b:iq4")
+LLM_BASE_URL = os.getenv("LLM_BASE_URL", "http://192.168.2.86:8080/v1")
+LLM_MODEL = os.getenv("LLM_MODEL", "mistral-small-24b")
 API_SECRET_TOKEN = os.getenv("API_SECRET_TOKEN", "change-this-to-a-secure-random-token")
 
 file_write_lock = threading.Lock()
@@ -80,42 +80,30 @@ def sanitize_slug(text: str) -> str:
 
 def clean_url(url: str) -> str:
     cleaned = re.sub(r'([&?])(treeref|queryId|clickref|authProvider|recId|_gl)=[^&]*', '', url)
-    cleaned = cleaned.rstrip('?&')
-    return cleaned
+    return cleaned.rstrip('?&')
 
 def clean_noise(text: str) -> str:
-    """Aggressively strip platform navigation, footers, and whitespace bloat."""
     if not text:
         return ""
-
     noise_patterns = [
-        # Ancestry nav and account junk
         r"(?i)Skip Ancestry main menu.*?(?=\n\n|\Z)",
         r"(?i)Home\s+Trees\s+Search\s+Memories\s+DNA.*?(?=\n\n|\Z)",
         r"(?i)Does this record match the person in your tree\?.*?(?=\n\n|\Z)",
         r"(?i)Add new information to your tree.*?(?=\n\n|\Z)",
         r"(?i)FactsHints\d+GalleryLifeStoryExp.*?(?=\n\n|\Z)",
-        # FamilySearch nav junk
         r"(?i)An official website of The Church of Jesus Christ of Latter-day Saints.*?(?=\n\n|\Z)",
         r"(?i)Family Tree\s+Search\s+Memories\s+Get Involved.*?(?=\n\n|\Z)",
-        # Find A Grave boilerplate
         r"(?i)Memorials\s+Cemeteries\s+Contribute\s+Famous.*?(?=\n\n|\Z)",
-        r"(?i)Photos\s+\d+\s+Flowers\s+\d+.*?(?=\n\n|\Z)",
-        # Cookie & login banners
         r"(?i)We use cookies.*?(?=\n\n|\Z)",
         r"(?i)Sign [Ii]n\s+to\s+your\s+account.*?(?=\n\n|\Z)",
     ]
-
     cleaned = text
     for p in noise_patterns:
         cleaned = re.sub(p, "", cleaned, flags=re.DOTALL)
-
-    # Collapse multiple consecutive newlines and spaces
     cleaned = re.sub(r'[ \t]+', ' ', cleaned)
-    cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
-    return cleaned.strip()
+    return re.sub(r'\n{3,}', '\n\n', cleaned).strip()
 
-def format_with_ollama(title: str, url: str, record_data: dict, text_content: str, selection: str, is_image: bool) -> Optional[str]:
+def format_with_llm(title: str, url: str, record_data: dict, text_content: str, selection: str, is_image: bool) -> Optional[str]:
     data_lines = [f"{k}: {v}" for k, v in record_data.items()]
     data_dump = "\n".join(data_lines)
     snippet = clean_noise(text_content[:3000])
@@ -145,19 +133,21 @@ def format_with_ollama(title: str, url: str, record_data: dict, text_content: st
     try:
         with httpx.Client(timeout=45.0) as client:
             resp = client.post(
-                f"{OLLAMA_BASE_URL}/api/generate",
+                f"{LLM_BASE_URL}/chat/completions",
                 json={
-                    "model": OLLAMA_MODEL,
-                    "prompt": prompt,
-                    "stream": False
+                    "model": LLM_MODEL,
+                    "messages": [
+                        {"role": "user", "content": prompt}
+                    ],
+                    "temperature": 0.1
                 }
             )
             if resp.status_code == 200:
-                out = resp.json().get("response", "").strip()
+                out = resp.json()["choices"][0]["message"]["content"].strip()
                 if out:
                     return out
     except Exception as e:
-        print(f"[Ollama] Offline or busy ({e}). Using direct markdown fallback.")
+        print(f"[LLM] Offline or busy ({e}). Using direct markdown fallback.")
     return None
 
 def append_to_vault(capture: CaptureRequest):
@@ -166,7 +156,6 @@ def append_to_vault(capture: CaptureRequest):
     time_str = now.strftime("%H:%M:%S")
     time_slug = now.strftime("%H%M%S")
 
-    # 1. Determine session subfolder
     if current_session["active"] and current_session.get("folder"):
         session_dir = VAULT_DIR / current_session["folder"]
     else:
@@ -178,8 +167,7 @@ def append_to_vault(capture: CaptureRequest):
     cleaned_title = capture.title.replace(" - FamilySearch", "").replace(" | Ancestry®", "").strip()
     title_slug = sanitize_slug(cleaned_title)
 
-    # 2. Attempt AI abstract
-    ai_summary = format_with_ollama(
+    ai_summary = format_with_llm(
         cleaned_title,
         cleaned_url,
         capture.recordData or {},
@@ -188,11 +176,9 @@ def append_to_vault(capture: CaptureRequest):
         capture.isImageRecord
     )
 
-    # 3. Build the Atomic Record Note (~1KB)
     record_filename = f"{time_slug}-{title_slug}.md"
     record_path = session_dir / record_filename
 
-    # Build YAML properties cleanly without raw column-0 dashes
     fence = "---"
     rec_type = "archive-image" if capture.isImageRecord else "record"
     ai_flag = "true" if ai_summary else "false"
@@ -224,32 +210,24 @@ def append_to_vault(capture: CaptureRequest):
     else:
         lines.append("*(AI offline – direct extract logged)*\n")
         lines.append("## Record Data")
-
-        # Priority 1: If structured table fields exist, write ONLY those (Drop raw body text!)
         if capture.recordData and len(capture.recordData) > 0:
             for k, v in capture.recordData.items():
                 clean_val = clean_noise(str(v))
                 if clean_val:
                     lines.append(f"- **{k}:** {clean_val}")
-
-        # Priority 2: Full-text search transcription snippet (strictly capped at 350 chars)
         elif capture.transcription:
             clean_sub = clean_noise(capture.transcription)[:350].strip()
             lines.append(f"> {clean_sub}...")
-
-        # Priority 3: Raw fallback excerpt (strictly capped at 250 chars)
         elif capture.rawFallback:
             clean_sub = clean_noise(capture.rawFallback)[:250].strip()
             lines.append(f"> {clean_sub}...")
 
     note_content = "\n".join(lines) + "\n"
 
-    # Write the atomic note
     with file_write_lock:
         with open(record_path, "w", encoding="utf-8") as f:
             f.write(note_content)
 
-        # 4. Append link to session index
         index_path = session_dir / "_Index.md"
         if not index_path.exists():
             with open(index_path, "w", encoding="utf-8") as f:
